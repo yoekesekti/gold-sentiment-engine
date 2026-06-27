@@ -202,7 +202,7 @@ st.markdown("""
         <div class="topbar-icon">⚜</div>
         <div>
             <div class="topbar-title">Gold Sentiment Engine</div>
-            <div class="topbar-sub">Two-Stage SVM &nbsp;·&nbsp; TF-IDF ngram 1–2 &nbsp;·&nbsp; 628 sampel berita emas</div>
+            <div class="topbar-sub">Two-Stage Logistic Regression &nbsp;·&nbsp; TF-IDF ngram 1–2 &nbsp;·&nbsp; 628 sampel berita emas</div>
         </div>
     </div>
     <div class="topbar-pill">Live Model</div>
@@ -299,7 +299,7 @@ if predict_btn:
 # ============================================================
 st.markdown("""
 <div class="page-footer">
-    <strong>Two-Stage SVM + Balanced</strong>
+    <strong>Two-Stage Logistic Regression (C=100, l1 penalty)</strong>
     &nbsp;·&nbsp; TF-IDF (ngram 1–2, max 3000)
     &nbsp;·&nbsp; Dataset: 628 sampel berita emas 2021–2026
 </div>

@@ -2,3 +2,5 @@
 *.pyc
 *.pyo
 .ipynb_checkpoints/
+Data Merge - Sheet2.csv
+preprocessed_data.csv

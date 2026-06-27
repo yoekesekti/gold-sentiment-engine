@@ -16,8 +16,8 @@ from nltk.stem import SnowballStemmer
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 vec        = joblib.load(os.path.join(BASE_DIR, 'tfidf_vectorizer.pkl'))
-svm_stage1 = joblib.load(os.path.join(BASE_DIR, 'svm_stage1.pkl'))
-svm_stage2 = joblib.load(os.path.join(BASE_DIR, 'svm_stage2.pkl'))
+lr_stage1  = joblib.load(os.path.join(BASE_DIR, 'lr_stage1.pkl'))
+lr_stage2  = joblib.load(os.path.join(BASE_DIR, 'lr_stage2.pkl'))
 preproc    = joblib.load(os.path.join(BASE_DIR, 'preprocessing_config.pkl'))
 
 stopwords_final = preproc['stopwords_final']
@@ -95,102 +95,47 @@ def preprocess(text):
 
 
 # =============================================================================
-# CONFIDENCE SCORE — MIN-MAX NORMALIZATION
+# CONFIDENCE SCORE — PREDICT_PROBA (Probabilitas Statistik)
 #
-# Dasar teori:
-#   LinearSVC menghasilkan decision_function f(x) = w·x + b, yaitu jarak
-#   titik data ke hyperplane pemisah. Semakin jauh jaraknya, semakin yakin
-#   model terhadap prediksinya.
+# LogisticRegression menghasilkan probabilitas sesungguhnya via predict_proba(),
+# bukan decision_function seperti LinearSVC.
 #
-#   Masalah: nilai ini tidak ternormalisasi — bisa bernilai negatif, nol,
-#   atau lebih dari 1, tergantung skala bobot model.
+# Stage 1 — predict_proba → [P(not_positive), P(positive)]
+#   - Jika P(positive) > 0.5 → positive
+#   - Confidence = P(positive)
 #
-#   Solusi Min-Max Normalization:
-#     confidence = clip((f(x) - df_min) / (df_max - df_min), 0, 1)
+# Stage 2 — predict_proba → [P(neutral), P(negative)]
+#   - Jika P(negative) >= 0.5 → negative, confidence = P(negative)
+#   - Jika P(negative) <  0.5 → neutral,  confidence = P(neutral)
 #
-#   Referensi rentang [df_min, df_max]:
-#     Nilai -3.0 dan 3.0 adalah rentang empiris yang umum untuk LinearSVC
-#     dengan fitur TF-IDF (Han et al., 2011; Manning et al., 2008).
-#     Pada rentang ini:
-#       f(x) <= -3.0  -> model sangat tidak yakin (confidence -> 0%)
-#       f(x) =   0.0  -> tepat di batas keputusan (confidence = 50%)
-#       f(x) >=  3.0  -> model sangat yakin (confidence -> 100%)
-#
-#   Catatan penting:
-#     Ini adalah SKOR RELATIF, bukan probabilitas statistik.
-#     Untuk probabilitas yang sesungguhnya, gunakan CalibratedClassifierCV
-#     dengan data validasi terpisah (Platt, 1999).
+# Tidak diperlukan Min-Max normalization maupun threshold manual.
 # =============================================================================
-
-DF_MIN = -3.0
-DF_MAX =  3.0
-
-# =============================================================================
-# THRESHOLD STAGE 1
-#
-# Masalah:
-#   LinearSVC stage 1 memisahkan Positive vs (Negative+Neutral).
-#   Kalau decision_function df1 bernilai positif tapi sangat kecil
-#   (misal 0.049), model tetap memilih Positive padahal sebenarnya
-#   dia tidak cukup yakin — teks tersebut seharusnya masuk Neutral.
-#
-# Solusi:
-#   Tambah threshold minimum df1. Kalau df1 < STAGE1_THRESHOLD meski p1=1,
-#   anggap model tidak cukup yakin -> teruskan ke stage 2
-#   agar bisa diklasifikasikan sebagai Neutral atau Negative.
-#
-#   Nilai 0.15 dipilih berdasarkan hasil debug:
-#     df1=0.049  -> terlalu kecil, harusnya Neutral
-#     df1=0.5+   -> cukup yakin sebagai Positive
-# =============================================================================
-
-STAGE1_THRESHOLD = 0.15
-
-
-def minmax_confidence(decision_value, df_min=DF_MIN, df_max=DF_MAX):
-    """
-    Normalisasi linear decision function SVM ke rentang [0.0, 1.0].
-
-    Formula:
-        confidence = (f(x) - df_min) / (df_max - df_min)
-        lalu di-clip ke [0, 1] agar aman di luar rentang kalibrasi.
-
-    Args:
-        decision_value (float) : output mentah dari decision_function()
-        df_min (float)         : batas bawah rentang normalisasi (default -3.0)
-        df_max (float)         : batas atas rentang normalisasi (default 3.0)
-
-    Returns:
-        float : nilai dalam rentang [0.0, 1.0]
-    """
-    normalized = (decision_value - df_min) / (df_max - df_min)
-    return float(np.clip(normalized, 0.0, 1.0))
 
 
 def get_class_distribution(X):
     """
-    Hitung skor relatif ketiga kelas berdasarkan kedua stage SVM.
+    Hitung skor probabilitas ketiga kelas dari Two-Stage Logistic Regression.
 
-    Arsitektur Two-Stage SVM:
-      Stage 1 -> memisahkan Positive vs (Negative + Neutral)
-      Stage 2 -> memisahkan Negative vs Neutral
+    Arsitektur Two-Stage:
+      Stage 1 → memisahkan Positive vs (Negative + Neutral)
+      Stage 2 → memisahkan Negative vs Neutral
 
     Strategi distribusi:
-      p_positive = minmax(df_stage1)
-      sisa       = 1 - p_positive  (porsi yang dibagi ke Neg & Neu)
-      p_negative = sisa x minmax(df_stage2)
-      p_neutral  = sisa x (1 - minmax(df_stage2))
+      p_positive = P(positive) dari Stage 1 predict_proba
+      sisa       = 1 - p_positive
+      p_negative = sisa x P(negative) dari Stage 2 predict_proba
+      p_neutral  = sisa x P(neutral) dari Stage 2 predict_proba
 
     Returns:
         dict : {'positive': float, 'negative': float, 'neutral': float}
                masing-masing dalam satuan persen (0.0 - 100.0)
     """
-    df1 = float(svm_stage1.decision_function(X)[0])
-    df2 = float(svm_stage2.decision_function(X)[0])
+    proba1 = lr_stage1.predict_proba(X)[0]   # [P(rest), P(positive)]
+    proba2 = lr_stage2.predict_proba(X)[0]   # [P(neutral), P(negative)]
 
-    p_positive    = minmax_confidence(df1)
+    p_positive    = float(proba1[1])
     p_not_pos     = 1.0 - p_positive
-    p_neg_portion = minmax_confidence(df2)
+    p_neg_portion = float(proba2[1])
 
     p_negative = p_not_pos * p_neg_portion
     p_neutral  = p_not_pos * (1.0 - p_neg_portion)
@@ -215,12 +160,11 @@ def predict_sentiment(text):
     """
     cleaned = preprocess(text)
     X = vec.transform([cleaned])
-    p1  = svm_stage1.predict(X)[0]
-    df1 = float(svm_stage1.decision_function(X)[0])
-    if p1 == 1 and df1 >= STAGE1_THRESHOLD:
+    proba1 = lr_stage1.predict_proba(X)[0]
+    if proba1[1] > 0.5:
         return 'positive'
-    p2 = svm_stage2.predict(X)[0]
-    return 'negative' if p2 == 1 else 'neutral'
+    proba2 = lr_stage2.predict_proba(X)[0]
+    return 'negative' if proba2[1] >= 0.5 else 'neutral'
 
 
 def predict_title_desc(title, description=""):
@@ -233,7 +177,6 @@ def predict_title_desc(title, description=""):
 
     Returns:
         tuple : (label, confidence, cleaned_text, distribution)
-                sama seperti predict_sentiment_with_proba()
     """
     merged = str(title) + ' ' + str(description)
     return predict_sentiment_with_proba(merged)
@@ -241,51 +184,45 @@ def predict_title_desc(title, description=""):
 
 def predict_sentiment_with_proba(text):
     """
-    Prediksi sentimen beserta confidence score ternormalisasi.
+    Prediksi sentimen beserta confidence score (probabilitas statistik).
 
-    Alur two-stage dengan threshold:
-      1. Stage 1 -> cek apakah Positive DAN df1 >= STAGE1_THRESHOLD
-         - Jika ya  : label = positive
-         - Jika tidak (termasuk p1=1 tapi df1 terlalu kecil):
-      2. Stage 2 -> cek apakah Negative atau Neutral
-         - Jika Negative : label = negative
-         - Jika Neutral  : label = neutral
+    Alur Two-Stage Logistic Regression:
+      1. Stage 1 → cek apakah P(positive) > 0.5
+         - Jika ya  : label = positive, confidence = P(positive)
+         - Jika tidak:
+      2. Stage 2 → cek apakah P(negative) >= 0.5
+         - Jika ya  : label = negative, confidence = P(negative)
+         - Jika tidak: label = neutral,  confidence = P(neutral)
 
     Args:
         text (str) : teks berita mentah
 
     Returns:
         label        (str)   : 'positive' | 'negative' | 'neutral'
-        confidence   (float) : skor kepercayaan 0.0-100.0
-                               (skor relatif, bukan probabilitas statistik)
+        confidence   (float) : probabilitas 0.0-100.0 (statistik)
         cleaned      (str)   : teks setelah preprocessing
         distribution (dict)  : {'positive': x, 'negative': y, 'neutral': z}
-                               skor relatif ketiga kelas dalam persen
+                               probabilitas ketiga kelas dalam persen
     """
     cleaned = preprocess(text)
     X = vec.transform([cleaned])
 
     # --- Stage 1: Positive vs (Negative + Neutral) ---
-    p1  = svm_stage1.predict(X)[0]
-    df1 = float(svm_stage1.decision_function(X)[0])
+    proba1 = lr_stage1.predict_proba(X)[0]   # [P(rest), P(positive)]
 
-    # Threshold: kalau df1 terlalu kecil meski p1=1,
-    # model tidak cukup yakin -> teruskan ke stage 2
-    if p1 == 1 and df1 >= STAGE1_THRESHOLD:
+    if proba1[1] > 0.5:
         label      = 'positive'
-        confidence = minmax_confidence(df1) * 100
-
+        confidence = float(proba1[1]) * 100
     else:
         # --- Stage 2: Negative vs Neutral ---
-        p2  = svm_stage2.predict(X)[0]
-        df2 = float(svm_stage2.decision_function(X)[0])
+        proba2 = lr_stage2.predict_proba(X)[0]   # [P(neutral), P(negative)]
 
-        label = 'negative' if p2 == 1 else 'neutral'
-        raw   = minmax_confidence(df2)
-
-        # Stage 2: 1 = Negative, 0 = Neutral
-        # confidence Negative = raw, confidence Neutral = 1 - raw
-        confidence = (raw if label == 'negative' else 1.0 - raw) * 100
+        if proba2[1] >= 0.5:
+            label      = 'negative'
+            confidence = float(proba2[1]) * 100
+        else:
+            label      = 'neutral'
+            confidence = float(proba2[0]) * 100
 
     distribution = get_class_distribution(X)
 
